@@ -356,12 +356,6 @@ def render_result(resp: dict):
 
 # ------------------------------------------------------------------ chat tab
 with tab_chat:
-    if not ss.turns:
-        st.markdown("<div class='muted'>Start with one of these, or type your own below.</div>", unsafe_allow_html=True)
-        cols = st.columns(3)
-        for k, ex in enumerate(EXAMPLES[:3]):
-            if cols[k].button(ex, key=f"hero_{k}", width="stretch"):
-                ss.pending = ex
     for t in ss.turns[:-1]:
         with st.chat_message("user"):
             st.markdown(t["user"])
