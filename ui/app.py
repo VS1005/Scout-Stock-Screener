@@ -330,8 +330,12 @@ with tab_bt:
     else:
         st.markdown("Screen: " + " AND ".join(i["text"] for i in ss.current["interpretation"]))
         c1, c2 = st.columns(2)
-        as_of = c1.date_input("Screen as of", value=date.today() - timedelta(days=200),
-                              min_value=date.today() - timedelta(days=560), max_value=date.today() - timedelta(days=30))
+        try:  # anchor on the data's date, not the clock: a deployed snapshot may be weeks old
+            anchor = date.fromisoformat(health["data_as_of"])
+        except (KeyError, TypeError, ValueError):
+            anchor = date.today()
+        as_of = c1.date_input("Screen as of", value=anchor - timedelta(days=200),
+                              min_value=anchor - timedelta(days=560), max_value=anchor - timedelta(days=30))
         horizon = c2.slider("Hold for (days)", 30, 365, 180, step=15)
         if st.button("Run backtest", type="primary"):
             bt = api("POST", "/v1/backtest", json={"screen": ss.current["screen"], "as_of": str(as_of),

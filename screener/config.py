@@ -11,7 +11,7 @@ load_dotenv(ROOT / ".env")
 
 DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
-DB_PATH = DATA_DIR / "market.duckdb"      # analytical store (read-only at query time)
+DB_PATH = Path(os.getenv("SCOUT_DB_PATH", DATA_DIR / "market.duckdb"))  # analytical store (read-only at query time)
 APP_DB_PATH = DATA_DIR / "app.sqlite"     # OLTP store: sessions, saved screens, alerts, LLM cache
 
 # LLM

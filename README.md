@@ -91,6 +91,8 @@ cp .env.example .env            # add a free Groq key; without one, the rule-bas
 
 To see alerts fire, build an older snapshot (`python -m etl.run --snapshot-only --as-of 2026-11-10`), save a screen with an alert, rebuild the current snapshot (`python -m etl.run --snapshot-only`), then click **Check alerts now**.
 
+**Hosted demo:** [deploy/streamlit/](deploy/streamlit/) runs on Streamlit Community Cloud. It starts the API inside the Streamlit process and serves a bundled snapshot dated 25 Nov 2026.
+
 The API requires an `X-API-Key` header and has OpenAPI docs at `/docs`. Its main routes:
 - `/v1/chat`
 - `/v1/screen` and `/v1/screen/patch` (edits without the LLM)
