@@ -60,7 +60,8 @@ class Parser:
     def __init__(self, llm: LLM):
         self.llm = llm
 
-    def parse(self, message: str, current: Optional[Screen] = None) -> ParseResult:
+    def parse(self, message: str, current: Optional[Screen] = None, prefer_llm: bool = False) -> ParseResult:
+        """prefer_llm=True sends every query to the LLM (the rule-based parse is then only a fallback)."""
         t0 = time.perf_counter()
         message = (message or "").strip()
         if not message:
@@ -69,14 +70,15 @@ class Parser:
             raise ParseError(f"Query too long (max {config.MAX_QUERY_CHARS} characters)")
 
         # 1) zero-token fast path
-        if current is not None:
+        use_fast = not (prefer_llm and self.llm.enabled and not self.llm.key_error)
+        if current is not None and use_fast:
             ops = parse_followup(message)
             if ops:
                 screen, changes = apply_patch(current, ops)
                 return ParseResult("patch", screen, "fastpath", changes=changes,
                                    latency_ms=(time.perf_counter() - t0) * 1000)
         fp = fast_parse(message)
-        if fp and fp.consumed_all:
+        if fp and fp.consumed_all and use_fast:
             return ParseResult("new", fp.screen, "fastpath",
                                latency_ms=(time.perf_counter() - t0) * 1000)
 

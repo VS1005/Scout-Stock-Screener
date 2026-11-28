@@ -17,7 +17,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from openai import RateLimitError
+from openai import AuthenticationError, RateLimitError
 
 from screener import config
 from screener.registry import catalogue_for_prompt, concepts_for_prompt
@@ -110,14 +110,56 @@ class LLM:
                              timeout=30, max_retries=0) if self.enabled else None
         self.system = SYSTEM.format(catalogue=catalogue_for_prompt(), concepts=concepts_for_prompt(),
                                     sectors=", ".join(sectors))
+        self.limits: Dict[str, Dict[str, Any]] = {}   # per model, from the provider's rate-limit headers
+        self.key_error: Optional[str] = None
+
+    # -------------------------------------------------------------- quota tracking
+    def _observe(self, model: str, headers) -> None:
+        """Record the provider's own rate-limit headers (Groq: requests/day, tokens/minute)."""
+        def num(k):
+            try:
+                return int(float(headers.get(k)))
+            except (TypeError, ValueError):
+                return None
+        if headers is None or headers.get("x-ratelimit-limit-requests") is None:
+            return
+        self.limits[model] = {
+            "requests_left_today": num("x-ratelimit-remaining-requests"),
+            "requests_per_day": num("x-ratelimit-limit-requests"),
+            "tokens_left_this_minute": num("x-ratelimit-remaining-tokens"),
+            "tokens_per_minute": num("x-ratelimit-limit-tokens"),
+            "requests_reset_in": headers.get("x-ratelimit-reset-requests"),
+            "observed_at": time.time(),
+        }
+
+    def _create(self, model: str, **kw):
+        """chat.completions.create that also captures rate-limit headers."""
+        raw = self.client.chat.completions.with_raw_response.create(model=model, **kw)
+        self._observe(model, raw.headers)
+        return raw.parse()
+
+    def quota(self, refresh_after_s: float = 600) -> Dict[str, Any]:
+        """Live free-tier quota. If nothing was observed recently, one tiny probe call (~10 tokens)
+        on the primary model fetches fresh headers."""
+        if self.enabled and not self.key_error:
+            last = max((v["observed_at"] for v in self.limits.values()), default=0)
+            if time.time() - last > refresh_after_s:
+                try:
+                    self._create(config.LLM_MODELS[0], messages=[{"role": "user", "content": "ok"}], max_tokens=5)
+                except AuthenticationError:
+                    self.key_error = "The LLM provider rejected the API key (401). Update GROQ_API_KEY."
+                except RateLimitError as e:
+                    self._observe(config.LLM_MODELS[0], getattr(e.response, "headers", None))
+                except Exception:  # noqa: BLE001 - quota display is best-effort
+                    pass
+        return {"enabled": self.enabled, "key_error": self.key_error, "models": self.limits}
 
     # -------------------------------------------------------------- guard
     def injection_score(self, text: str) -> Optional[float]:
         if not (self.enabled and config.PROMPT_GUARD_ENABLED):
             return None
         try:
-            r = self.client.chat.completions.create(model=config.PROMPT_GUARD_MODEL,
-                                                    messages=[{"role": "user", "content": text}])
+            r = self._create(config.PROMPT_GUARD_MODEL, messages=[{"role": "user", "content": text}])
             return float(r.choices[0].message.content.strip())
         except Exception:  # noqa: BLE001 - guard is defence-in-depth; fail open (DSL validation still applies)
             return None
@@ -153,12 +195,16 @@ class LLM:
             model = queue.pop(0)
             for attempt in range(2):              # 1 repair retry with the validator's error message
                 try:
-                    r = self.client.chat.completions.create(
-                        model=model, messages=messages, temperature=0, max_tokens=1500,
+                    r = self._create(
+                        model, messages=messages, temperature=0, max_tokens=1500,
                         response_format={"type": "json_object"},
                         extra_body={"reasoning_effort": "low"},
                     )
+                except AuthenticationError:
+                    self.key_error = "The LLM provider rejected the API key (401). Update GROQ_API_KEY."
+                    raise LLMError(self.key_error)
                 except RateLimitError as e:
+                    self._observe(model, getattr(e.response, "headers", None))
                     # free tiers are per-model token-per-minute buckets: try the next model first;
                     # if every model is throttled, wait once for the server's retry-after (capped).
                     last_err = f"{model}: rate limited"

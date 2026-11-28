@@ -15,7 +15,7 @@ DB_PATH = Path(os.getenv("SCOUT_DB_PATH", DATA_DIR / "market.duckdb"))  # analyt
 APP_DB_PATH = DATA_DIR / "app.sqlite"     # OLTP store: sessions, saved screens, alerts, LLM cache
 
 # LLM
-LLM_API_KEY = os.getenv("GROQ_API_KEY", "")
+LLM_API_KEY = os.getenv("GROQ_API_KEY", "").strip().strip("\"'").strip()  # tolerate pasted quotes/spaces
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
 LLM_MODELS = [m.strip() for m in os.getenv("LLM_MODELS", "openai/gpt-oss-20b,openai/gpt-oss-120b").split(",") if m.strip()]
 PROMPT_GUARD_MODEL = os.getenv("PROMPT_GUARD_MODEL", "meta-llama/llama-prompt-guard-2-22m")

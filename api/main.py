@@ -13,7 +13,7 @@ import socket
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Literal, Optional
 from urllib.parse import urlparse
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -92,6 +92,7 @@ def safe_webhook(url: Optional[str]) -> Optional[str]:
 class ChatIn(BaseModel):
     message: str = Field(..., min_length=1, max_length=config.MAX_QUERY_CHARS)
     session_id: Optional[str] = Field(None, max_length=32)
+    mode: Literal["auto", "llm"] = "auto"   # auto: rules first, LLM when needed · llm: LLM for every query
 
 
 class ScreenIn(BaseModel):
@@ -137,7 +138,9 @@ def interpretation(screen: Screen) -> List[dict]:
 @app.get("/health")
 def health():
     e: Engine = STATE["engine"]
-    return {"status": "ok", "data_as_of": str(e.as_of), "stocks": len(e.snap), "llm_enabled": STATE["llm"].enabled}
+    llm = STATE["llm"]
+    return {"status": "ok", "data_as_of": str(e.as_of), "stocks": len(e.snap),
+            "llm_enabled": llm.enabled and not llm.key_error, "llm_error": llm.key_error}
 
 
 @app.get("/v1/meta")
@@ -182,7 +185,7 @@ def chat(body: ChatIn, who: str = Depends(rate_limited)):
                     "diagnosis": diag, "screen": current.model_dump(), "path": "fastpath", "tokens": 0}
 
     try:
-        pr = STATE["parser"].parse(body.message, current)
+        pr = STATE["parser"].parse(body.message, current, prefer_llm=body.mode == "llm")
     except ParseError as e:
         store.log_query(who, body.message, "error", (time.perf_counter() - t0) * 1000, 0, False)
         raise HTTPException(422, str(e))
@@ -314,6 +317,12 @@ def backtest(body: BacktestIn, _: str = Depends(owner)):
 @app.get("/v1/stats")
 def stats(_: str = Depends(owner)):
     return STATE["store"].stats()
+
+
+@app.get("/v1/quota")
+def quota(_: str = Depends(owner)):
+    """Free-tier LLM budget: the provider's own rate-limit headers plus today's usage on this server."""
+    return {**STATE["llm"].quota(), "today": STATE["store"].usage_today()}
 
 
 @app.exception_handler(ValidationError)

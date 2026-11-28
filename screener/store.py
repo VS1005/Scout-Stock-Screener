@@ -114,6 +114,12 @@ class Store:
         self._q("INSERT INTO query_log (ts, owner, message, path, latency_ms, tokens, ok) VALUES (?,?,?,?,?,?,?)",
                 (now(), owner, message[:500], path, latency_ms, tokens, int(ok)))
 
+    def usage_today(self) -> Dict[str, int]:
+        r = self._q("SELECT COUNT(*) FILTER (WHERE path='llm') llm, COUNT(*) FILTER (WHERE path='cache') cache, "
+                    "COUNT(*) FILTER (WHERE path IN ('fastpath','diagnose')) rules, COALESCE(SUM(tokens),0) tok "
+                    "FROM query_log WHERE substr(ts,1,10)=?", (now()[:10],))[0]
+        return {"llm_queries": r["llm"], "cached": r["cache"], "rule_based": r["rules"], "tokens": r["tok"]}
+
     def stats(self) -> Dict[str, Any]:
         rows = self._q("SELECT path, COUNT(*) n, AVG(latency_ms) lat, SUM(tokens) tok FROM query_log GROUP BY path")
         return {r["path"]: {"queries": r["n"], "avg_latency_ms": round(r["lat"] or 0, 1), "tokens": r["tok"] or 0}
