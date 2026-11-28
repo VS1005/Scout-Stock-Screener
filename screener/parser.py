@@ -21,7 +21,7 @@ class ParseError(ValueError):
 class ParseResult:
     action: str                         # new | patch | clarify | unsupported
     screen: Optional[Screen]
-    path: str                           # fastpath | cache | llm
+    path: str                           # fastpath | cache | llm | degraded
     reply: str = ""
     changes: List[str] = field(default_factory=list)
     unmapped: List[str] = field(default_factory=list)
@@ -44,12 +44,11 @@ def _validate_llm(obj: dict, current: Optional[Screen], notes: List[str]) -> Opt
         if obj["action"] == "new":
             Screen.model_validate(obj.get("screen") or {})
         elif obj["action"] == "patch":
-            if current is None:
-                obj["action"] = "new"
-                ops = [PatchOp.model_validate(o) for o in obj.get("ops") or []]
-                apply_patch(Screen(), ops)
+            ops = [PatchOp.model_validate(o) for o in obj.get("ops") or []]
+            if current is None:  # a "patch" with nothing to patch is a new screen built from those ops
+                obj["action"], obj["screen"] = "new", apply_patch(Screen(), ops)[0].model_dump(exclude_none=True)
             else:
-                apply_patch(current, [PatchOp.model_validate(o) for o in obj.get("ops") or []])
+                apply_patch(current, ops)
     except ValidationError as e:
         return _short_err(e)
     except (TypeError, ValueError, KeyError) as e:
@@ -78,7 +77,7 @@ class Parser:
                                    latency_ms=(time.perf_counter() - t0) * 1000)
         fp = fast_parse(message)
         if fp and fp.consumed_all:
-            return ParseResult("new", fp.screen, "fastpath", notes=fp.notes,
+            return ParseResult("new", fp.screen, "fastpath",
                                latency_ms=(time.perf_counter() - t0) * 1000)
 
         # 2) LLM path - guard first (skipped for cache hits: those inputs were already screened)

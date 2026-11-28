@@ -104,6 +104,9 @@ def main():
         ms = (time.perf_counter() - t0) * 1000
         tot["n"] += 1
         tot[f"path_{path}"] += 1
+        if path == "handoff":  # --no-llm: not answered (and not refused) by the fast path
+            rows.append((it["id"], it["cat"], path, "-", ms))
+            continue
         if it.get("reject"):
             ok = rejected or screen is None or not screen.all
             tot["reject_total"] += 1
@@ -114,9 +117,6 @@ def main():
             tot["reject_total"] += 1
             tot["reject_ok"] += 1
             rows.append((it["id"], it["cat"], path, "REFUSED (safe)", ms))
-            continue
-        if path == "handoff":
-            rows.append((it["id"], it["cat"], path, "-", ms))
             continue
         tp, n_pred, n_gold = score(screen, it["gold"]) if screen else (0, 0, len(it["gold"]))
         tot["tp"] += tp

@@ -50,17 +50,9 @@ def _fetch_one(symbol: str) -> Dict:
     import yfinance as yf
 
     path = CACHE / f"{symbol}.json"
-    t = yf.Ticker(f"{symbol}.NS")
     if path.exists():
-        cached = json.loads(path.read_text())
-        if "financialCurrency" in (cached.get("meta") or {}):
-            return cached
-        try:  # older cache entry: top up the reporting currency only
-            cached.setdefault("meta", {})["financialCurrency"] = (t.info or {}).get("financialCurrency")
-            path.write_text(json.dumps(cached))
-        except Exception:  # noqa: BLE001
-            pass
-        return cached
+        return json.loads(path.read_text())
+    t = yf.Ticker(f"{symbol}.NS")
     rows: List[dict] = []
     for attr, freq in [("income_stmt", "A"), ("quarterly_income_stmt", "Q"), ("balance_sheet", "A"),
                        ("quarterly_balance_sheet", "Q"), ("cashflow", "A")]:
@@ -131,7 +123,7 @@ def fetch_fundamentals(symbols: List[str], workers: int = 4) -> tuple:
             "shares_out": m.get("sharesOutstanding") or m.get("impliedSharesOutstanding"),
             # yfinance reports Indian dividend yield already in percent (1.95 = 1.95%)
             "dividend_yield": m.get("dividendYield"),
-            "insider_pct": (m.get("heldPercentInsiders") or 0) * 100 if m.get("heldPercentInsiders") else None,
+            "insider_pct": m["heldPercentInsiders"] * 100 if m.get("heldPercentInsiders") is not None else None,
         })
     fin_df = pd.DataFrame(fin)
     currency = {r["symbol"]: (r.get("meta") or {}).get("financialCurrency") or "INR" for r in results}

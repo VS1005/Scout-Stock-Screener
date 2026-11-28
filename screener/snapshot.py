@@ -22,7 +22,9 @@ import pandas as pd
 from screener.config import ANNUAL_REPORT_LAG_DAYS, QUARTERLY_REPORT_LAG_DAYS
 
 CR = 1e7  # 1 crore = 10 million INR
-FINANCIAL_SECTORS = {"Financial Services"}  # leverage ratios are not meaningful for lenders
+FINANCIAL_SECTORS = {"Financial Services"}
+FINANCIAL_NA_FIELDS = ("debt_to_equity", "interest_coverage")  # leverage is a lender's raw material
+YEAR = 252  # trading sessions in a year
 
 
 def _pct(a, b):
@@ -49,17 +51,17 @@ def _technical(g: pd.DataFrame, bench_ret: pd.Series, bench_6m: float) -> Dict[s
 
     sma50 = c.rolling(50).mean()
     sma200 = c.rolling(200).mean()
-    yr = c.iloc[-252:]
+    yr = c.iloc[-YEAR:]
     daily = c.pct_change()
     out = {
         "close": last,
-        "ret_1w": ret(5), "ret_1m": ret(21), "ret_3m": ret(63), "ret_6m": ret(126), "ret_1y": ret(250),
+        "ret_1w": ret(5), "ret_1m": ret(21), "ret_3m": ret(63), "ret_6m": ret(126), "ret_1y": ret(YEAR),
         "sma_50": sma50.iloc[-1], "sma_200": sma200.iloc[-1],
         "rsi_14": _rsi(c) if n > 20 else np.nan,
         "high_52w": yr.max(), "low_52w": yr.min(),
         "pct_from_52w_high": _pct(last, yr.max()),
         "pct_from_52w_low": _pct(last, yr.min()),
-        "volatility_1y": float(daily.iloc[-252:].std() * np.sqrt(252) * 100) if n > 60 else np.nan,
+        "volatility_1y": float(daily.iloc[-YEAR:].std() * np.sqrt(YEAR) * 100) if n > 60 else np.nan,
         "max_drawdown_1y": float(((yr / yr.cummax()) - 1).min() * 100) if n > 20 else np.nan,
         "avg_turnover_cr_20d": float(g["turnover_lacs"].iloc[-20:].mean() / 100),
         "volume_ratio_20d": float(g["volume"].iloc[-1] / g["volume"].iloc[-21:-1].mean())
@@ -78,7 +80,7 @@ def _technical(g: pd.DataFrame, bench_ret: pd.Series, bench_6m: float) -> Dict[s
         out["golden_cross_20d"] = None
     out["rel_strength_6m"] = out["ret_6m"] - bench_6m if pd.notna(out["ret_6m"]) else np.nan
     # beta vs Nifty 50 on overlapping daily returns
-    r = pd.Series(daily.values, index=g["date"].values).iloc[-252:]
+    r = pd.Series(daily.values, index=g["date"].values).iloc[-YEAR:]
     j = pd.concat([r, bench_ret], axis=1, join="inner").dropna()
     out["beta_1y"] = float(np.cov(j.iloc[:, 0], j.iloc[:, 1])[0, 1] / j.iloc[:, 1].var()) if len(j) > 60 else np.nan
     return out
@@ -167,7 +169,8 @@ def _fundamental(fin: pd.DataFrame) -> Dict[str, float]:
     ebit = _latest(fin, "ebit", "A", 1)
     intr = _latest(fin, "interest_expense", "A", 1)
     if len(ebit) and len(intr):
-        out["interest_coverage"] = min(ebit.iloc[-1] / intr.iloc[-1], 100.0) if intr.iloc[-1] > 0 else 100.0
+        i = abs(intr.iloc[-1])  # Yahoo reports interest expense with either sign
+        out["interest_coverage"] = min(ebit.iloc[-1] / i, 100.0) if i > 0 else 100.0  # no interest = fully covered
     else:
         out["interest_coverage"] = np.nan
     fcf = _latest(fin, "free_cf", "A", 1)
@@ -204,9 +207,9 @@ def build_snapshot(con, as_of: pd.Timestamp, symbols: Optional[list] = None) -> 
         [start, as_of]).df()["close"]
     bench_6m = _pct(idx500.iloc[-1], idx500.iloc[-127]) if len(idx500) > 127 else np.nan
 
-    rows = []
+    rows, members = [], set(uni["symbol"])
     for sym, g in prices.groupby("symbol"):
-        if sym not in set(uni["symbol"]) or g["date"].iloc[-1] < eff_date - pd.Timedelta(days=10):
+        if sym not in members or g["date"].iloc[-1] < eff_date - pd.Timedelta(days=10):
             continue  # not in universe or suspended / delisted
         row = {"symbol": sym}
         row.update(_technical(g, bench_ret, bench_6m))
@@ -218,14 +221,13 @@ def build_snapshot(con, as_of: pd.Timestamp, symbols: Optional[list] = None) -> 
     snap["mcap_rank"] = snap["market_cap_cr"].rank(ascending=False, method="first")
     # AMFI/SEBI categorisation: top 100 = large, 101–250 = mid, rest = small
     snap["cap_category"] = np.select(
-        [snap["mcap_rank"] <= 100, snap["mcap_rank"] <= 250], ["Large", "Mid"], "Small")
+        [snap["mcap_rank"] <= 100, snap["mcap_rank"] <= 250, snap["mcap_rank"].notna()], ["Large", "Mid", "Small"], None)
     np_ttm = snap["net_profit_ttm_cr"]
     snap["pe"] = np.where(np_ttm > 0, snap["market_cap_cr"] / np_ttm, np.nan)
     snap["pb"] = np.where(snap["equity_cr"] > 0, snap["market_cap_cr"] / snap["equity_cr"], np.nan)
     snap["earnings_yield"] = np.where(snap["market_cap_cr"] > 0, np_ttm / snap["market_cap_cr"] * 100, np.nan)
     # Leverage ratios are meaningless for banks/NBFCs (deposits & borrowings are their raw material)
-    fin_mask = snap["sector"].isin(FINANCIAL_SECTORS)
-    snap.loc[fin_mask, ["debt_to_equity", "interest_coverage"]] = np.nan
+    snap.loc[snap["sector"].isin(FINANCIAL_SECTORS), list(FINANCIAL_NA_FIELDS)] = np.nan
     snap = snap.rename(columns={"insider_pct": "promoter_holding_pct"})
     snap["as_of"] = eff_date
     for c in ("above_sma_200", "above_sma_50", "golden_cross_20d"):

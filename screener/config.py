@@ -20,7 +20,6 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
 LLM_MODELS = [m.strip() for m in os.getenv("LLM_MODELS", "openai/gpt-oss-20b,openai/gpt-oss-120b").split(",") if m.strip()]
 PROMPT_GUARD_MODEL = os.getenv("PROMPT_GUARD_MODEL", "meta-llama/llama-prompt-guard-2-22m")
 PROMPT_GUARD_ENABLED = os.getenv("PROMPT_GUARD_ENABLED", "true").lower() == "true"
-PROMPT_VERSION = "v4"  # bump to invalidate the LLM cache when the prompt changes
 
 # API
 API_KEYS = {k.strip() for k in os.getenv("SCREENER_API_KEYS", "demo-key-123").split(",") if k.strip()}

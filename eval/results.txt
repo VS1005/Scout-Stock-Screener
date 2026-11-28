@@ -7,38 +7,37 @@
   6 vague        fastpath  3/3 gold, 3 predicted                  0
   7 vague        fastpath  2/2 gold, 2 predicted                  0
   8 vague        fastpath  4/4 gold, 4 predicted                  0
-  9 vague        llm       3/3 gold, 3 predicted               2552
- 10 vague        fastpath  2/2 gold, 2 predicted                  1
- 11 vague        llm       1/1 gold, 2 predicted                722
+  9 vague        fastpath  3/3 gold, 3 predicted                  0
+ 10 vague        fastpath  2/2 gold, 2 predicted                  0
+ 11 vague        llm       1/1 gold, 2 predicted               1957
  12 vague        fastpath  1/1 gold, 1 predicted                  1
  13 sector       fastpath  3/3 gold, 3 predicted                  1
- 14 sector       llm       2/2 gold, 2 predicted                661
+ 14 sector       llm       2/2 gold, 2 predicted               1017
  15 sector       fastpath  2/2 gold, 2 predicted                  1
- 16 negation     llm       2/2 gold, 2 predicted               1056
- 17 negation     llm       3/3 gold, 3 predicted               3203
- 18 or           llm       2/2 gold, 2 predicted              20213
- 19 or           llm       2/2 gold, 2 predicted               1102
- 20 sort         fastpath  3/3 gold, 3 predicted                  1
- 21 sort         llm       4/4 gold, 4 predicted              19815
- 22 technical    llm       2/2 gold, 2 predicted                988
- 23 technical    llm       2/2 gold, 2 predicted              16858
- 24 colloquial   llm       3/3 gold, 3 predicted               1118
- 25 colloquial   degraded  1/3 gold, 1 predicted              15597
- 26 unmappable   llm       1/1 gold, 1 predicted               1209
- 27 unmappable   llm       1/1 gold, 1 predicted              18932
- 28 adversarial  rejected  REJECTED OK                          197
- 29 adversarial  llm       1/1 gold, 1 predicted               1027
- 30 off-topic    llm       REJECTED OK                         1128
+ 16 negation     llm       2/2 gold, 2 predicted               1128
+ 17 negation     llm       3/3 gold, 3 predicted               1231
+ 18 or           llm       2/2 gold, 2 predicted               1491
+ 19 or           llm       2/2 gold, 2 predicted               1266
+ 20 sort         fastpath  3/3 gold, 3 predicted                  0
+ 21 sort         llm       4/4 gold, 4 predicted              20126
+ 22 technical    llm       2/2 gold, 2 predicted                955
+ 23 technical    llm       2/2 gold, 2 predicted              18382
+ 24 colloquial   llm       3/3 gold, 3 predicted                978
+ 25 colloquial   llm       3/3 gold, 3 predicted              18716
+ 26 unmappable   llm       1/1 gold, 1 predicted               1540
+ 27 unmappable   llm       1/1 gold, 1 predicted              20716
+ 28 adversarial  rejected  REJECTED OK                          388
+ 29 adversarial  llm       1/1 gold, 1 predicted               2070
+ 30 off-topic    llm       REJECTED OK                         1698
 
 === Summary ===
-condition precision 98.3% · recall 96.6% · F1 97.4%  (over answered queries)
-  degraded: 1/30 queries
-  fastpath: 13/30 queries
+condition precision 98.3% · recall 100.0% · F1 99.2%  (over answered queries)
+  fastpath: 14/30 queries
        llm: 15/30 queries
   rejected: 1/30 queries
 off-topic/adversarial correctly refused: 2/2
 unmappable concepts surfaced to user: 2/2
-LLM tokens used this run: 38,984
+LLM tokens used this run: 39,747
 
 per category (precision / recall):
   explicit     100.0% / 100.0%
@@ -48,6 +47,6 @@ per category (precision / recall):
   or           100.0% / 100.0%
   sort         100.0% / 100.0%
   technical    100.0% / 100.0%
-  colloquial   100.0% /  66.7%
+  colloquial   100.0% / 100.0%
   unmappable   100.0% / 100.0%
   adversarial  100.0% / 100.0%

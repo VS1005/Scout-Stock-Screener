@@ -63,6 +63,8 @@ class Condition(BaseModel):
                 self.value = [lo, hi]
                 vals = [lo, hi]
             elif isinstance(v, RefValue):
+                if v.ref == "field" and FIELDS[v.field].unit != f.unit:  # e.g. P/E (x) vs ROE (%)
+                    raise ValueError(f"cannot compare {self.field} with {v.field}: different units")
                 vals = []
             elif isinstance(v, bool) or not isinstance(v, (int, float)):
                 raise ValueError(f"{self.field} needs a number or a reference value")
@@ -166,12 +168,12 @@ def resolve_field(name: str) -> Tuple[Optional[str], Optional[str]]:
 def repair(obj: Any, notes: List[str]) -> Any:
     """Walk a raw dict and fix field names in place where we're confident; record what we changed."""
     if isinstance(obj, dict):
-        for key in ("field",):
-            if key in obj and isinstance(obj[key], str) and obj[key] not in FIELDS and obj[key] != "match_strength":
-                fixed, note = resolve_field(obj[key])
-                if fixed:
-                    obj[key] = fixed
-                    notes.append(note)
+        f = obj.get("field")
+        if isinstance(f, str) and f not in FIELDS and f != "match_strength":
+            fixed, note = resolve_field(f)
+            if fixed:
+                obj["field"] = fixed
+                notes.append(note)
         for v in obj.values():
             repair(v, notes)
     elif isinstance(obj, list):

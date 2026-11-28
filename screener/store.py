@@ -11,9 +11,9 @@ from typing import Any, Dict, List, Optional
 from screener.config import APP_DB_PATH
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, owner TEXT, screen TEXT, history TEXT, updated TEXT);
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, owner TEXT, screen TEXT, updated TEXT);
 CREATE TABLE IF NOT EXISTS screens (id TEXT PRIMARY KEY, owner TEXT, name TEXT, query TEXT, screen TEXT, created TEXT);
-CREATE TABLE IF NOT EXISTS alerts (id TEXT PRIMARY KEY, owner TEXT, screen_id TEXT, webhook TEXT, active INTEGER,
+CREATE TABLE IF NOT EXISTS alerts (id TEXT PRIMARY KEY, owner TEXT, screen_id TEXT, webhook TEXT,
     last_members TEXT, last_run TEXT, last_as_of TEXT, created TEXT);
 CREATE TABLE IF NOT EXISTS alert_events (id INTEGER PRIMARY KEY AUTOINCREMENT, alert_id TEXT, ts TEXT, as_of TEXT,
     symbol TEXT, event TEXT, detail TEXT);
@@ -37,22 +37,22 @@ class Store:
 
     def _q(self, sql: str, args: tuple = ()) -> List[sqlite3.Row]:
         with self._lock:
-            cur = self._con.execute(sql, args)
+            rows = self._con.execute(sql, args).fetchall()  # fetch first: DELETE ... RETURNING is still open
             self._con.commit()
-            return cur.fetchall()
+            return rows
 
     # sessions --------------------------------------------------------------
     def get_session(self, sid: str, owner: str) -> Optional[Dict[str, Any]]:
         r = self._q("SELECT * FROM sessions WHERE id=? AND owner=?", (sid, owner))
         if not r:
             return None
-        return {"id": sid, "screen": json.loads(r[0]["screen"]) if r[0]["screen"] else None,
-                "history": json.loads(r[0]["history"] or "[]")}
+        return {"id": sid, "screen": json.loads(r[0]["screen"]) if r[0]["screen"] else None}
 
-    def save_session(self, sid: Optional[str], owner: str, screen: Optional[dict], history: list) -> str:
+    def save_session(self, sid: Optional[str], owner: str, screen: Optional[dict]) -> str:
+        """A session is just the conversation's current screen; follow-ups are patches applied to it."""
         sid = sid or uuid.uuid4().hex[:12]
-        self._q("INSERT OR REPLACE INTO sessions VALUES (?,?,?,?,?)",
-                (sid, owner, json.dumps(screen) if screen else None, json.dumps(history[-20:]), now()))
+        self._q("INSERT OR REPLACE INTO sessions (id, owner, screen, updated) VALUES (?,?,?,?)",
+                (sid, owner, json.dumps(screen) if screen else None, now()))
         return sid
 
     # saved screens ----------------------------------------------------------
@@ -77,15 +77,13 @@ class Store:
     # alerts -------------------------------------------------------------------
     def create_alert(self, owner: str, screen_id: str, webhook: Optional[str], members: List[str], as_of: str) -> str:
         aid = uuid.uuid4().hex[:10]
-        self._q("INSERT INTO alerts VALUES (?,?,?,?,?,?,?,?,?)",
-                (aid, owner, screen_id, webhook, 1, json.dumps(members), now(), as_of, now()))
+        self._q("INSERT INTO alerts (id, owner, screen_id, webhook, last_members, last_run, last_as_of, created) "
+                "VALUES (?,?,?,?,?,?,?,?)", (aid, owner, screen_id, webhook, json.dumps(members), now(), as_of, now()))
         return aid
 
     def list_alerts(self, owner: Optional[str] = None) -> List[dict]:
-        rows = (self._q("SELECT a.*, s.name AS screen_name FROM alerts a JOIN screens s ON s.id=a.screen_id "
-                        "WHERE a.owner=? ORDER BY a.created DESC", (owner,)) if owner
-                else self._q("SELECT a.*, s.name AS screen_name FROM alerts a JOIN screens s ON s.id=a.screen_id "
-                             "WHERE a.active=1"))
+        sql = "SELECT a.*, s.name AS screen_name FROM alerts a JOIN screens s ON s.id=a.screen_id"
+        rows = (self._q(sql + " WHERE a.owner=? ORDER BY a.created DESC", (owner,)) if owner else self._q(sql))
         return [{**dict(r), "last_members": json.loads(r["last_members"] or "[]")} for r in rows]
 
     def delete_alert(self, aid: str, owner: str) -> bool:

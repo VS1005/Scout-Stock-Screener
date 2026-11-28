@@ -18,12 +18,11 @@ from urllib.parse import urlparse
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 
 from screener import config
 from screener.alerts import evaluate_alert, run_all
-from screener.dsl import PatchOp, Screen, apply_patch, describe
+from screener.dsl import Condition, PatchOp, Screen, apply_patch, describe
 from screener.engine import Engine
 from screener.llm import LLM
 from screener.parser import ParseError, Parser
@@ -46,10 +45,9 @@ async def lifespan(app: FastAPI):
     sched.shutdown(wait=False)
 
 
-app = FastAPI(title="NL Stock Screener API", version="1.0", lifespan=lifespan,
+# No CORS middleware: the Streamlit UI calls this API from its Python server, not from the browser.
+app = FastAPI(title="Scout API", version="1.0", lifespan=lifespan,
               description="Natural-language stock screening over NSE data with a validated query DSL.")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
-                   allow_methods=["*"], allow_headers=["*"])
 
 
 # ------------------------------------------------------------------ security
@@ -149,15 +147,10 @@ def meta(_: str = Depends(owner)):
         "as_of": str(e.as_of), "universes": list(UNIVERSES),
         "fields": [{"key": f.key, "label": f.label, "kind": f.kind, "group": f.group, "unit": f.unit,
                     "description": f.desc} for f in FIELDS.values()],
-        "concepts": [{"phrase": c.phrases[0], "means": [describe_dict(d) for d in c.conditions],
+        "concepts": [{"phrase": c.phrases[0], "means": [describe(Condition(**d)) for d in c.conditions],
                       "rationale": c.rationale} for c in CONCEPTS],
         "categories": e.categories(),
     }
-
-
-def describe_dict(d: dict) -> str:
-    from screener.dsl import Condition
-    return describe(Condition(**d))
 
 
 WHY_RX = re.compile(r"\bwhy\b.*?\b(isn'?t|is not|not|is|did)\b", re.I)
@@ -169,12 +162,11 @@ def chat(body: ChatIn, who: str = Depends(rate_limited)):
     store: Store = STATE["store"]
     sess = store.get_session(body.session_id, who) if body.session_id else None
     current = Screen.model_validate(sess["screen"]) if sess and sess.get("screen") else None
-    history = sess["history"] if sess else []
     t0 = time.perf_counter()
 
     # Zero-token diagnostic: "why isn't TCS in the list?" → evidence per criterion
     if current is not None and WHY_RX.search(body.message):
-        syms = [w.upper() for w in re.findall(r"[A-Za-z&]{2,}", body.message) if engine.stock(w.upper())]
+        syms = [w.upper() for w in re.findall(r"[A-Za-z0-9&-]{2,}", body.message) if engine.stock(w.upper())]
         if syms:
             diag = engine.diagnose(current, syms[0]) or []
             failed = [d["text"] for d in diag if not d["passed"]]
@@ -195,10 +187,8 @@ def chat(body: ChatIn, who: str = Depends(rate_limited)):
         store.log_query(who, body.message, "error", (time.perf_counter() - t0) * 1000, 0, False)
         raise HTTPException(422, str(e))
     result = engine.run(pr.screen) if pr.screen is not None else None
-    if pr.screen is not None:
-        history.append({"role": "user", "text": body.message})
-    sid = store.save_session(body.session_id, who, pr.screen.model_dump() if pr.screen else
-                             (current.model_dump() if current else None), history)
+    kept = pr.screen or current  # clarify/unsupported replies keep the conversation's current screen
+    sid = store.save_session(body.session_id, who, kept.model_dump() if kept else None)
     store.log_query(who, body.message, pr.path, pr.latency_ms, pr.tokens, True)
     return {
         "session_id": sid, "action": pr.action, "reply": pr.reply,
@@ -215,8 +205,7 @@ def run_screen(body: ScreenIn, who: str = Depends(owner)):
     """Deterministic execution of an explicit DSL (no LLM) — used when users edit chips."""
     store: Store = STATE["store"]
     if body.session_id:
-        sess = store.get_session(body.session_id, who)
-        store.save_session(body.session_id, who, body.screen.model_dump(), sess["history"] if sess else [])
+        store.save_session(body.session_id, who, body.screen.model_dump())
     return {"screen": body.screen.model_dump(), "interpretation": interpretation(body.screen),
             "result": STATE["engine"].run(body.screen)}
 
@@ -262,12 +251,8 @@ def save_screen(body: SaveIn, who: str = Depends(owner)):
 
 @app.get("/v1/screens")
 def list_screens(who: str = Depends(owner)):
-    return [{**s, "description": [describe_any(c) for c in Screen.model_validate(s["screen"]).all]}
+    return [{**s, "description": [describe(c) for c in Screen.model_validate(s["screen"]).all]}
             for s in STATE["store"].list_screens(who)]
-
-
-def describe_any(c) -> str:
-    return describe(c)
 
 
 @app.delete("/v1/screens/{sid}")

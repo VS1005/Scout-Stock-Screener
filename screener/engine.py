@@ -5,6 +5,7 @@ numbers, so they cannot hallucinate.
 """
 from __future__ import annotations
 
+import difflib
 import math
 import threading
 import time
@@ -16,9 +17,9 @@ import pandas as pd
 
 from screener.compiler import Compiled, compile_screen
 from screener.config import DB_PATH, QUERY_TIMEOUT_S
-from screener.dsl import AnyGroup, Condition, PatchOp, RefValue, Screen, describe, fmt_num, fmt_value
+from screener.dsl import OP_WORDS, Condition, PatchOp, RefValue, Screen, describe, fmt_num, fmt_value
 from screener.registry import CAT, FIELDS, NUM
-from screener.snapshot import FINANCIAL_SECTORS
+from screener.snapshot import FINANCIAL_NA_FIELDS, FINANCIAL_SECTORS
 
 
 def _sandboxed_connection(snap: pd.DataFrame, table: str = "snapshot") -> duckdb.DuckDBPyConnection:
@@ -61,13 +62,15 @@ class Engine:
 
     @staticmethod
     def _robust_scales(snap: pd.DataFrame) -> Dict[str, float]:
-        """IQR per numeric field → puts 'margin of safety' for P/E and ROE on a common scale."""
+        """Spread per numeric field (IQR; std if the IQR is degenerate) → puts a P/E margin and an ROE
+        margin on one comparable scale. Measured from the data, so no per-field constants."""
         out = {}
         for k, f in FIELDS.items():
             if f.kind == NUM and k in snap:
                 s = pd.to_numeric(snap[k], errors="coerce").dropna()
-                iqr = float(s.quantile(0.75) - s.quantile(0.25)) if len(s) > 10 else 0
-                out[k] = iqr if iqr > 0 else f.scale
+                iqr = float(s.quantile(0.75) - s.quantile(0.25)) if len(s) else 0.0
+                std = float(s.std()) if len(s) > 1 else 0.0
+                out[k] = iqr if iqr > 0 else (std if std > 0 else 1.0)
         return out
 
     def categories(self) -> Dict[str, List[str]]:
@@ -82,14 +85,12 @@ class Engine:
         """Category values must exist in the data; fix case/near-misses, report unknowns."""
         notes = []
         cats = self.categories()
-        import difflib
         for leaf in screen.leaves():
             f = FIELDS[leaf.field]
             if f.kind != CAT or leaf.op == "contains":
                 continue
-            fixed = []
+            fixed, lower = [], {c.lower(): c for c in cats.get(leaf.field, [])}
             for v in leaf.value:
-                lower = {c.lower(): c for c in cats.get(leaf.field, [])}
                 if v.lower() in lower:
                     fixed.append(lower[v.lower()])
                     continue
@@ -112,19 +113,18 @@ class Engine:
         finally:
             timer.cancel()
 
-    def run(self, screen: Screen, con=None, scales=None, explain_limit: int = 100) -> Dict[str, Any]:
+    def run(self, screen: Screen) -> Dict[str, Any]:
         t0 = time.perf_counter()
-        if con is None:
-            self.reload()
-            con, scales = self.con, self._scales
-        notes = self.check_categories(screen) if con is self.con else []
+        self.reload()
+        notes = self.check_categories(screen)
         comp = compile_screen(screen)
         with self._lock:
-            df = self._execute(con, comp)
+            df = self._execute(self.con, comp)
         n_crit = len(comp.criteria)
         crit_ids = [c["id"] for c in comp.criteria]
         df["__passed"] = df[crit_ids].sum(axis=1) if n_crit else 0
-        df["match_strength"] = self._strength(df, comp, scales)
+        margins = self._leaf_margins(df, comp, self._scales)
+        df["match_strength"] = self._strength(df, comp, margins)
 
         matches = df[df["__passed"] == n_crit].copy()
         if screen.sort and screen.sort.field in matches:
@@ -142,8 +142,8 @@ class Engine:
             "universe_size": int(len(df)),
             "total_matches": int(total),
             "criteria": [self._criterion_stats(df, c) for c in comp.criteria],
-            "results": [self._explain_row(r, comp, scales) for _, r in matches.head(explain_limit).iterrows()],
-            "near_misses": self._near_misses(df, comp, scales) if n_crit >= 2 else [],
+            "results": [self._explain_row(r, comp, margins) for _, r in matches.iterrows()],
+            "near_misses": self._near_misses(df, comp, margins) if n_crit >= 2 else [],
             "suggestions": self._relaxations(df, comp, screen) if total < 5 and n_crit else [],
             "warnings": screen.warnings() + notes,
             "sql": comp.sql,
@@ -175,52 +175,38 @@ class Engine:
 
     # -------------------------------------------------------------- explanation helpers
     @staticmethod
-    def _margin(leaf: Condition, value: Any, ref: Any, scale: float) -> float:
-        """Signed distance by which a value clears its threshold, in IQR units (negative = fails)."""
-        if leaf.op in ("is", "in", "not_in", "contains"):
-            return 1.0
-        if value is None or (isinstance(value, float) and math.isnan(value)):
-            return -1.0
-        if isinstance(leaf.value, RefValue):
-            t = ref
-        elif leaf.op == "between":
-            lo, hi = leaf.value
-            return min(value - lo, hi - value) / scale
-        else:
-            t = leaf.value
-        if t is None or (isinstance(t, float) and math.isnan(t)):
-            return -1.0
-        d = (value - t) if leaf.op in (">", ">=") else (t - value)
-        return d / scale
-
-    def _strength(self, df: pd.DataFrame, comp: Compiled, scales) -> pd.Series:
-        """0-100: average margin of safety across numeric criteria (how robustly a stock qualifies)."""
-        if df.empty or not comp.criteria:
-            return pd.Series(0.0, index=df.index)
-        margins = []
+    def _leaf_margins(df: pd.DataFrame, comp: Compiled, scales) -> Dict[str, pd.Series]:
+        """Signed distance by which each row clears each NUMERIC leaf, in units of that field's spread
+        (negative = fails, NaN = value or threshold missing). One definition used by match strength,
+        borderline flags and near-miss ranking."""
+        out = {}
         for entry in comp.criteria:
-            best = None
             for col, leaf, refcol in entry["leaves"]:
                 if FIELDS[leaf.field].kind != NUM:
                     continue
-                vals = df[leaf.field].astype(float)
-                ref = df[refcol].astype(float) if refcol else None
-                if isinstance(leaf.value, RefValue):
-                    t = ref
-                    m = ((vals - t) if leaf.op in (">", ">=") else (t - vals)) / scales.get(leaf.field, 1)
-                elif leaf.op == "between":
+                vals = pd.to_numeric(df[leaf.field], errors="coerce")
+                if leaf.op == "between":
                     lo, hi = leaf.value
-                    m = np.minimum(vals - lo, hi - vals) / scales.get(leaf.field, 1)
+                    d = np.minimum(vals - lo, hi - vals)
                 else:
-                    t = float(leaf.value)
-                    m = ((vals - t) if leaf.op in (">", ">=") else (t - vals)) / scales.get(leaf.field, 1)
-                m = m.fillna(-1).clip(-2, 2)
-                best = m if best is None else np.maximum(best, m)
-            if best is not None:
-                margins.append(best)
-        if not margins:
+                    t = pd.to_numeric(df[refcol], errors="coerce") if refcol else float(leaf.value)
+                    d = (vals - t) if leaf.op in (">", ">=") else (t - vals)
+                out[col] = d / scales.get(leaf.field, 1.0)
+        return out
+
+    @staticmethod
+    def _strength(df: pd.DataFrame, comp: Compiled, margins: Dict[str, pd.Series]) -> pd.Series:
+        """0-100 'margin of safety': average over numeric criteria of how far the stock clears the
+        threshold, in spread units clipped to ±2 (50 = exactly at the thresholds, 100 = 2 spreads clear).
+        Missing data counts as a 1-spread fail. Category/yes-no criteria are pass/fail and don't move it."""
+        per_crit = []
+        for entry in comp.criteria:
+            ms = [margins[col].fillna(-1).clip(-2, 2) for col, _, _ in entry["leaves"] if col in margins]
+            if ms:  # OR-group: the best-qualifying member counts
+                per_crit.append(pd.concat(ms, axis=1).max(axis=1))
+        if not per_crit:
             return pd.Series(50.0, index=df.index)
-        avg = sum(margins) / len(margins)
+        avg = pd.concat(per_crit, axis=1).mean(axis=1)
         return (50 + 25 * avg).clip(0, 100).round(0)
 
     def _leaf_text(self, row, leaf: Condition, refcol: Optional[str], passed: bool) -> dict:
@@ -228,11 +214,12 @@ class Engine:
         val = row.get(leaf.field)
         missing = val is None or (isinstance(val, float) and math.isnan(val)) or (val is pd.NA)
         if missing:
-            reason = "no data"
-            if f.na_note and row.get("sector") in FINANCIAL_SECTORS and "bank" in f.na_note.lower():
+            if leaf.field in FINANCIAL_NA_FIELDS and row.get("sector") in FINANCIAL_SECTORS:
                 reason = f.na_note
             elif f.na_note:
                 reason = f"no data ({f.na_note})"
+            else:
+                reason = "no data"
             return {"field": leaf.field, "passed": False, "text": f"{f.label}: {reason}", "missing": True}
         if f.kind == NUM:
             shown = fmt_num(leaf.field, val)
@@ -241,7 +228,6 @@ class Engine:
                 target = f"{fmt_value(leaf.field, leaf.value)} ({fmt_num(leaf.field, ref)})"
             else:
                 target = fmt_value(leaf.field, leaf.value)
-            from screener.dsl import OP_WORDS
             text = f"{f.label} {shown} {OP_WORDS[leaf.op] if passed else 'fails ' + OP_WORDS[leaf.op]} {target}"
         elif f.kind == CAT:
             text = f"{f.label}: {val}"
@@ -251,7 +237,7 @@ class Engine:
             text += f"  ·  from “{leaf.source_phrase}”"
         return {"field": leaf.field, "passed": bool(passed), "text": text, "missing": False}
 
-    def _explain_row(self, r: pd.Series, comp: Compiled, scales) -> dict:
+    def _explain_row(self, r: pd.Series, comp: Compiled, margins: Dict[str, pd.Series]) -> dict:
         reasons, tight = [], []
         for entry in comp.criteria:
             leaf_out = [self._leaf_text(r, leaf, refcol, bool(r[col])) for col, leaf, refcol in entry["leaves"]]
@@ -261,12 +247,9 @@ class Engine:
                                 "field": "any"})
             else:
                 reasons.extend(leaf_out)
-            for col, leaf, refcol in entry["leaves"]:
-                if FIELDS[leaf.field].kind == NUM and bool(r[col]):
-                    m = self._margin(leaf, r.get(leaf.field), r.get(refcol) if refcol else None,
-                                     scales.get(leaf.field, 1))
-                    if m < 0.1:
-                        tight.append(FIELDS[leaf.field].label)
+            for col, leaf, _ in entry["leaves"]:
+                if col in margins and bool(r[col]) and margins[col][r.name] < 0.1:  # within 0.1 spread
+                    tight.append(FIELDS[leaf.field].label)
         summary = (f"Qualifies, but only just on {', '.join(tight)} - a small change could drop it."
                    if tight else "Clears every criterion with room to spare.")
         return {
@@ -291,17 +274,20 @@ class Engine:
             "rationale": next((l.rationale for _, l, _ in leaves if l.rationale), None),
         }
 
-    def _near_misses(self, df: pd.DataFrame, comp: Compiled, scales, k: int = 8) -> List[dict]:
+    def _near_misses(self, df: pd.DataFrame, comp: Compiled, margins: Dict[str, pd.Series],
+                     k: int = 8) -> List[dict]:
         """Stocks failing exactly ONE criterion, ranked by how close they came."""
         n = len(comp.criteria)
         cand = df[df["__passed"] == n - 1]
         out = []
-        for _, r in cand.iterrows():
+        for idx, r in cand.iterrows():
             failed = next(e for e in comp.criteria if not r[e["id"]])
-            col, leaf, refcol = failed["leaves"][0]
-            if FIELDS[leaf.field].kind != NUM or pd.isna(r.get(leaf.field)):
-                continue  # wrong sector / missing data is not "close" - only numeric misses are near-misses
-            gap = self._margin(leaf, r.get(leaf.field), r.get(refcol) if refcol else None, scales.get(leaf.field, 1))
+            # only a measurable numeric shortfall is "close"; wrong sector or missing data is not
+            scored = [(margins[col][idx], leaf, refcol) for col, leaf, refcol in failed["leaves"]
+                      if col in margins and pd.notna(margins[col][idx])]
+            if not scored:
+                continue
+            gap, leaf, refcol = max(scored, key=lambda x: x[0])
             out.append({
                 "symbol": r["symbol"], "name": r["name"], "sector": r["sector"],
                 "missed": self._leaf_text(r, leaf, refcol, False)["text"],
@@ -319,8 +305,9 @@ class Engine:
             pool = df[df[others].all(axis=1)] if others else df
             if len(pool) == 0:
                 continue
-            col, leaf, refcol = entry["leaves"][0]
-            s = {"criterion": describe(leaf), "matches_if_removed": int(len(pool)),
+            leaf = entry["leaves"][0][1]
+            s = {"criterion": " OR ".join(describe(l) for _, l, _ in entry["leaves"]),
+                 "matches_if_removed": int(len(pool)),
                  "patch": [PatchOp(op="remove", field=leaf.field).model_dump(exclude_none=True)]}
             if (entry["kind"] == "leaf" and FIELDS[leaf.field].kind == NUM and leaf.op in (">", ">=", "<", "<=")
                     and not isinstance(leaf.value, RefValue)):
@@ -328,8 +315,9 @@ class Engine:
                 if len(vals):
                     asc = leaf.op in ("<", "<=")
                     ordered = vals.sort_values(ascending=asc).reset_index(drop=True)
-                    new_t = ordered.iloc[min(target, len(ordered)) - 1]
-                    new_t = float(np.round(new_t, 2))
+                    new_t = float(ordered.iloc[min(target, len(ordered)) - 1])
+                    # round AWAY from the pool so the promised stocks are still included
+                    new_t = math.ceil(new_t * 100) / 100 if asc else math.floor(new_t * 100) / 100
                     new_leaf = leaf.model_copy(update={"value": new_t, "op": "<=" if asc else ">=", "assumed": True,
                                                        "rationale": f"relaxed from {fmt_value(leaf.field, leaf.value)}"})
                     s.update({
@@ -351,6 +339,12 @@ class Engine:
         t = pd.Timestamp(as_of)
         src = duckdb.connect(str(self.db_path), read_only=True)
         try:
+            first = pd.Timestamp(src.execute("SELECT min(date) FROM prices").fetchone()[0])
+            uses_technicals = any(FIELDS[l.field].group == "technical" for l in screen.leaves())
+            if uses_technicals and (t - first).days < 365:
+                # 1-year technicals (52w high, 200-DMA, volatility...) would be NaN → every stock fails silently
+                raise ValueError(f"technical criteria need a year of price history before the backtest date; "
+                                 f"earliest valid date is {(first + pd.Timedelta(days=365)).date()}")
             snap = build_snapshot(src, t)
             start = pd.Timestamp(snap["as_of"].iloc[0])
             end_target = start + pd.Timedelta(days=horizon_days)

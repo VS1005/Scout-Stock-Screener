@@ -8,7 +8,7 @@ both paths interpret "low debt" identically.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from screener.dsl import Condition, PatchOp, Screen, Sort
 from screener.registry import CONCEPTS, FIELDS, NUM, SECTOR_ALIASES
@@ -32,17 +32,12 @@ CMP = {
 
 
 def _syn_map():
+    """Numeric-field names/synonyms → field key (synonyms never overlap concept phrases; see registry)."""
     m = {}
     for k, f in FIELDS.items():
-        if f.kind != NUM:
-            continue
-        for s in (k.replace("_", " "), f.label.lower(), *f.synonyms):
-            m.setdefault(s.lower(), k)
-    # vague one-word synonyms must not be treated as explicit field mentions
-    for vague in ("profitable", "cheap", "expensive", "valuation", "low debt", "debt free", "liquid",
-                  "dividend paying", "oversold", "overbought", "increasing revenue", "stable", "risky",
-                  "low risk", "defensive", "accumulation", "smart money", "near high", "near low", "uptrend"):
-        m.pop(vague, None)
+        if f.kind == NUM:
+            for s in (k.replace("_", " "), f.label.lower(), *f.synonyms):
+                m.setdefault(s.lower(), k)
     return m
 
 
@@ -73,8 +68,8 @@ def _normalise(q: str) -> str:
 
 
 class FastParse:
-    def __init__(self, screen: Screen, consumed_all: bool, leftovers: List[str], notes: List[str]):
-        self.screen, self.consumed_all, self.leftovers, self.notes = screen, consumed_all, leftovers, notes
+    def __init__(self, screen: Screen, consumed_all: bool, leftovers: List[str]):
+        self.screen, self.consumed_all, self.leftovers = screen, consumed_all, leftovers
 
 
 def parse(query: str) -> Optional[FastParse]:
@@ -83,7 +78,7 @@ def parse(query: str) -> Optional[FastParse]:
         return None
     mask = list(q)
     conds: List[Condition] = []
-    universe, sort, limit, notes = "NIFTY500", None, 25, []
+    universe, sort, limit = "NIFTY500", None, 25
 
     def consume(m: re.Match):
         for i in range(m.start(), m.end()):
@@ -126,17 +121,22 @@ def parse(query: str) -> Optional[FastParse]:
 
     # sectors / industries (require context for the ambiguous alias "it")
     text = "".join(mask)
-    sector_vals, industry_vals = [], []
+    sector_vals, industry_vals, said = [], [], []
     for alias in sorted(SECTOR_ALIASES, key=len, reverse=True):
         pat = (r"\bit\s+(?=stocks|companies|sector|firms|shares|services)" if alias == "it"
                else rf"\b{re.escape(alias)}\b")
         for m in re.finditer(pat, text):
             col, val = SECTOR_ALIASES[alias]
-            (sector_vals if col == "sector" else industry_vals).append(val)
+            if col == "sector":
+                sector_vals.append(val)
+                said.append(alias)
+            else:
+                industry_vals.append(val)
             text = text[:m.start()] + " " * (m.end() - m.start()) + text[m.end():]
     mask = list(text)
     if sector_vals:
-        conds.append(Condition(field="sector", op="in", value=sorted(set(sector_vals)), source_phrase="sector"))
+        conds.append(Condition(field="sector", op="in", value=sorted(set(sector_vals)),
+                               source_phrase=" / ".join(dict.fromkeys(said))))
     for v in sorted(set(industry_vals)):
         conds.append(Condition(field="industry", op="contains", value=v, source_phrase=v.lower()))
 
@@ -151,7 +151,7 @@ def parse(query: str) -> Optional[FastParse]:
             seen.add(key)
             uniq.append(c)
     screen = Screen(universe=universe, all=uniq, sort=sort, limit=limit)
-    return FastParse(screen, consumed_all=not leftovers, leftovers=leftovers, notes=notes)
+    return FastParse(screen, consumed_all=not leftovers, leftovers=leftovers)
 
 
 REFINE_CUE = re.compile(r"^(only|also|and|add|plus|now|just|filter|with|then)\b")

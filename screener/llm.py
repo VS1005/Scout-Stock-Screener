@@ -2,7 +2,7 @@
 
 Token discipline
   * only called when the zero-token fast path can't fully parse the query;
-  * responses cached by sha256(prompt version, model chain, message, current screen);
+  * responses cached by sha256(prompt text, model chain, message, current screen);
   * low reasoning effort, compact field catalogue, JSON-only output;
   * at most one repair retry, fed the exact validation error.
 Safety
@@ -124,8 +124,10 @@ class LLM:
 
     # -------------------------------------------------------------- translate
     def _key(self, message: str, current: Optional[dict]) -> str:
+        # The prompt text itself is part of the key: any change to the field catalogue or the concept
+        # glossary invalidates old interpretations automatically (no manual version bump to forget).
         norm = " ".join(message.lower().split())
-        blob = json.dumps([config.PROMPT_VERSION, config.LLM_MODELS, norm, current], sort_keys=True)
+        blob = json.dumps([self.system, _EXAMPLE_ASSISTANT, config.LLM_MODELS, norm, current], sort_keys=True)
         return hashlib.sha256(blob.encode()).hexdigest()
 
     def is_cached(self, message: str, current: Optional[dict]) -> bool:

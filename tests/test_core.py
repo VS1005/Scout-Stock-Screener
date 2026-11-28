@@ -115,7 +115,7 @@ def test_patch_remove_and_replace():
 
 
 # ------------------------------------------------------------------ engine logic on a synthetic snapshot
-def _synthetic_engine():
+def _synthetic_engine(**overrides):
     rng = np.random.default_rng(0)
     n = 40
     snap = pd.DataFrame({
@@ -127,6 +127,8 @@ def _synthetic_engine():
         "in_nifty500": True, "in_nifty50": [True] * 5 + [False] * 35, "in_nifty100": False, "in_nifty200": False,
         "as_of": pd.Timestamp("2026-01-01"),
     })
+    for k, v in overrides.items():
+        snap[k] = v
     e = Engine.__new__(Engine)
     import threading
     e._lock = threading.Lock()
@@ -182,8 +184,77 @@ def test_corporate_action_back_adjustment():
     assert adj["volume"].iloc[0] == pytest.approx(1000)
 
 
+def _tiny_market():
+    """Two stocks, 30 sessions, one quarterly/annual revenue history - enough to exercise build_snapshot."""
+    import duckdb
+    dates = pd.bdate_range(end="2026-08-20", periods=30)
+    prices = pd.concat([pd.DataFrame({"symbol": sym, "date": dates, "open": 100.0, "high": 100.0, "low": 100.0,
+                                      "close": 100.0, "prev_close": 100.0, "volume": 1000.0,
+                                      "turnover_lacs": 10.0, "deliv_pct": 50.0}) for sym in ("A", "B")])
+    universe = pd.DataFrame({"symbol": ["A", "B"], "name": ["A Ltd", "B Ltd"], "sector": ["IT", "IT"],
+                             "isin": ["x", "y"], "in_nifty50": True, "in_nifty100": True, "in_nifty200": True,
+                             "in_nifty500": True, "industry": "Software", "shares_out": [1e7, np.nan],
+                             "dividend_yield": 1.0, "insider_pct": 50.0})
+    q_ends = ["2025-09-30", "2025-12-31", "2026-03-31", "2026-06-30"]
+    fin = pd.DataFrame([{"symbol": "A", "freq": "Q", "period_end": pd.Timestamp(d), "item": "revenue",
+                         "value": v * 1e7} for d, v in zip(q_ends, [100, 100, 100, 1000])]
+                       + [{"symbol": "A", "freq": "A", "period_end": pd.Timestamp("2026-03-31"), "item": "revenue",
+                           "value": 400e7}])
+    idx = pd.concat([pd.DataFrame({"date": dates, "index_name": n, "close": 100.0, "pe": 20.0})
+                     for n in ("Nifty 50", "Nifty 500")])
+    con = duckdb.connect(":memory:")
+    for name, df in [("prices", prices), ("universe", universe), ("financials", fin), ("index_prices", idx)]:
+        con.register("_d", df)
+        con.execute(f"CREATE TABLE {name} AS SELECT * FROM _d")
+        con.unregister("_d")
+    return con
+
+
 def test_point_in_time_filter_respects_filing_lag():
-    from screener.config import QUARTERLY_REPORT_LAG_DAYS
-    period_end = pd.Timestamp("2026-06-30")
-    available = period_end + pd.Timedelta(days=QUARTERLY_REPORT_LAG_DAYS)
-    assert available == pd.Timestamp("2026-08-14")
+    """The June quarter is public only 45 days later (SEBI LODR): not on Aug 13, yes on Aug 14."""
+    from screener.snapshot import build_snapshot
+    con = _tiny_market()
+    before = build_snapshot(con, pd.Timestamp("2026-08-13")).set_index("symbol")
+    after = build_snapshot(con, pd.Timestamp("2026-08-14")).set_index("symbol")
+    assert before.loc["A", "revenue_ttm_cr"] == pytest.approx(400)    # 3 quarters public → annual figure
+    assert after.loc["A", "revenue_ttm_cr"] == pytest.approx(1300)    # 4 quarters public → TTM sum
+
+
+def test_missing_market_cap_gets_no_cap_class():
+    from screener.snapshot import build_snapshot
+    snap = build_snapshot(_tiny_market(), pd.Timestamp("2026-08-20")).set_index("symbol")
+    assert snap.loc["A", "cap_category"] == "Large"
+    assert snap.loc["B", "cap_category"] is None   # unknown share count must not be labelled "Small"
+
+
+def test_relaxation_suggestion_delivers_promised_matches():
+    # 5th-best ROE is 15.236: naive rounding would suggest ">= 15.24" and lose that very stock
+    e = _synthetic_engine(roe=[20, 19, 18, 17, 15.236] + [1.0] * 35)
+    s = Screen.model_validate({"all": [{"field": "roe", "op": ">", "value": 50}]})
+    for sg in e.run(s)["suggestions"]:
+        if sg.get("relax_to"):
+            relaxed, _ = apply_patch(s, [PatchOp.model_validate(o) for o in sg["patch"]])
+            assert e.run(relaxed)["total_matches"] >= sg["matches_if_relaxed"]
+
+
+def test_llm_patch_without_current_screen_becomes_new_screen():
+    from screener.parser import _validate_llm
+    obj = {"action": "patch", "ops": [{"op": "add", "condition": {"field": "roe", "op": ">", "value": 15}}]}
+    assert _validate_llm(obj, None, []) is None
+    assert obj["action"] == "new" and Screen.model_validate(obj["screen"]).all[0].field == "roe"
+
+
+def test_field_reference_requires_same_unit():
+    with pytest.raises(ValidationError):
+        Screen.model_validate({"all": [{"field": "pe", "op": "<", "value": {"ref": "field", "field": "roe"}}]})
+    Screen.model_validate({"all": [{"field": "operating_margin_pct", "op": ">",
+                                    "value": {"ref": "field", "field": "net_margin_pct"}}]})
+
+
+def test_store_delete_returns_and_commits(tmp_path):
+    from screener.store import Store
+    st = Store(tmp_path / "app.sqlite")
+    sid = st.save_screen("me", "s", "", {"all": []})
+    aid = st.create_alert("me", sid, None, [], "2026-11-25")
+    assert st.delete_alert(aid, "me") and st.delete_screen(sid, "me")
+    assert not st.delete_screen(sid, "me") and st.list_screens("me") == []

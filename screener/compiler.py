@@ -13,7 +13,7 @@ per-criterion explanations, with no extra queries.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, List, Tuple
+from typing import Any, List
 
 from screener.dsl import AnyGroup, Condition, RefValue, Screen
 from screener.registry import FIELDS, UNIVERSES
@@ -76,12 +76,10 @@ def compile_screen(screen: Screen, table: str = "snapshot") -> Compiled:
         raise ValueError("unknown table")
     params: List[Any] = []
     ref_selects, pass_selects, criteria = [], [], []
-    used = list(dict.fromkeys(BASE_COLS + [l.field for l in screen.leaves()]
-                              + [l.value.field for l in screen.leaves()
-                                 if isinstance(l.value, RefValue) and l.value.field]))
-    if screen.sort and screen.sort.field in FIELDS:
-        used.append(screen.sort.field)
-    used = list(dict.fromkeys(used))
+    used = list(dict.fromkeys(
+        BASE_COLS + [l.field for l in screen.leaves()]
+        + [l.value.field for l in screen.leaves() if isinstance(l.value, RefValue) and l.value.field]
+        + ([screen.sort.field] if screen.sort and screen.sort.field in FIELDS else [])))
 
     # Reference values (sector medians, percentiles) are computed over the FULL Nifty-500 so that
     # "cheaper than sector peers" is stable regardless of the chosen sub-universe.
