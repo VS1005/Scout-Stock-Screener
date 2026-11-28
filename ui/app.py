@@ -36,7 +36,8 @@ def api(method: str, path: str, **kw):
     try:
         r = httpx.request(method, f"{API}{path}", headers={"X-API-Key": KEY}, timeout=60, **kw)
     except httpx.HTTPError as e:
-        st.error(f"API unreachable at {API}: {e}")
+        st.session_state["api_error"] = f"API unreachable at {API}: {e}"
+        st.error(st.session_state["api_error"])
         return None
     if r.status_code >= 400:
         try:
@@ -45,6 +46,7 @@ def api(method: str, path: str, **kw):
             detail = r.text
         if isinstance(detail, list):
             detail = "; ".join(d.get("msg", str(d)) for d in detail[:3])
+        st.session_state["api_error"] = str(detail)
         st.error(detail)
         return None
     return r.json()
@@ -67,8 +69,10 @@ EXAMPLES = [
 
 
 def send(message: str):
+    ss.pop("api_error", None)
     resp = api("POST", "/v1/chat", json={"message": message, "session_id": ss.session_id})
-    if resp is None:
+    if resp is None:  # keep the question and the reason visible after the rerun
+        ss.turns.append({"user": message, "resp": {"error": ss.get("api_error", "Request failed")}})
         return
     ss.session_id = resp.get("session_id") or ss.session_id
     ss.turns.append({"user": message, "resp": resp})
@@ -249,6 +253,9 @@ with tab_chat:
             st.markdown(t["user"])
         with st.chat_message("assistant"):
             r = t["resp"]
+            if r.get("error"):
+                st.error(r["error"])
+                continue
             st.caption(path_badge(r))
             txt = r.get("reply") or "; ".join(r.get("changes") or []) or ""
             if r.get("result"):
@@ -260,7 +267,9 @@ with tab_chat:
             st.markdown(last["user"])
         with st.chat_message("assistant"):
             r = last["resp"]
-            if r.get("action") == "diagnose":
+            if r.get("error"):
+                st.error(r["error"])
+            elif r.get("action") == "diagnose":
                 st.caption("🩺 diagnosis · 0 tokens")
                 st.markdown(r["reply"])
                 for d in r.get("diagnosis", []):
